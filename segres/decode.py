@@ -39,27 +39,48 @@ def polygon_to_mask(segmentation, height, width):
 
 def build_file_to_annotations(data):
     """
-    Map file_name -> merged list of annotations.
+    Map file_name -> annotations from a single annotator.
 
     The raw annotation file lists the same physical image under multiple
-    image_ids (one per annotation batch), so annotations for one file_name
-    must be gathered across every image_id that shares it, not just one.
+    image_ids when several annotators independently traced it (id suffix
+    01/02/03 = annotator pass). Take only the first pass (lowest image_id)
+    per file_name instead of merging all annotators' polygons together,
+    which would union disagreeing traces into one inflated mask.
     """
     images_by_id, anns_by_image_id = build_lookup_tables(data)
 
-    file_to_anns = {}
-    for image_id, image_info in images_by_id.items():
+    file_to_image_id = {}
+    for image_id, image_info in sorted(images_by_id.items()):
         file_name = image_info["file_name"]
-        file_to_anns.setdefault(file_name, []).extend(anns_by_image_id.get(image_id, []))
+        file_to_image_id.setdefault(file_name, image_id)
 
-    return file_to_anns
+    return {
+        file_name: anns_by_image_id.get(image_id, [])
+        for file_name, image_id in file_to_image_id.items()
+    }
 
 
-def build_combined_mask(annotations, height, width):
-    """Combine all filament masks for one image into a single binary mask."""
+DEFAULT_CATEGORY_IDS = frozenset({1, 2})  # 1=Left, 2=Right; excludes 3=Unidentifiable, 4=Ambiguous
+
+
+def build_combined_mask(annotations, height, width, category_ids=DEFAULT_CATEGORY_IDS):
+    """
+    Combine filament masks for one image into a single binary mask.
+
+    category_ids: which annotation categories count as foreground. Default
+    excludes category 3 "Unidentifiable" (37.5% of annotations) and 4
+    "Ambiguous" (unused in this dataset) — deliberately, since those are
+    cases the annotator themself couldn't confidently call a filament, and
+    burning them into the mask unconditionally trains the model on uncertain
+    labels. Pass category_ids=None to include everything (old behavior).
+    Chirality (Left/Right, category 1 vs 2) is still collapsed into one
+    binary mask here — this only decides what counts as foreground at all.
+    """
     combined = np.zeros((height, width), dtype=np.uint8)
 
     for ann in annotations:
+        if category_ids is not None and ann["category_id"] not in category_ids:
+            continue
         seg = ann["segmentation"]
         m = polygon_to_mask(seg, height, width)
         combined = np.logical_or(combined, m).astype(np.uint8)

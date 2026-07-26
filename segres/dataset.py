@@ -3,7 +3,7 @@ from functools import lru_cache
 
 import numpy as np
 from PIL import Image
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from .tiling import get_tile_coordinates, extract_tile
 from .decode import load_annotations, build_file_to_annotations, build_combined_mask
@@ -22,6 +22,7 @@ class SolarFilamentDataset(Dataset):
         image_height=2048,
         image_width=2048,
         mask_cache_size=16,
+        return_meta=False,
     ):
         """
         file_names: list of base file names, e.g. "20260901165702Bh.jpeg"
@@ -36,10 +37,14 @@ class SolarFilamentDataset(Dataset):
         image_height, image_width: expected full image dimensions (2048x2048 here)
         mask_cache_size: number of full-image masks to keep decoded in memory,
             so the 512x512 tiles of the same image don't each re-run RLE decode
+        return_meta: if True (and is_test=False), also return file_name, y, x
+            alongside image/mask tiles, so tiles can be stitched back into
+            full images for image-level validation metrics
         """
         self.images_dir = images_dir
         self.transform = transform
         self.is_test = is_test
+        self.return_meta = return_meta
         self.tile_size = tile_size
         self.image_height = image_height
         self.image_width = image_width
@@ -62,7 +67,9 @@ class SolarFilamentDataset(Dataset):
             for (y, x) in self.tile_coords:
                 self.index.append((file_name, y, x))
 
-        self._build_mask = lru_cache(maxsize=mask_cache_size)(self._build_mask_uncached)
+        # cache image+mask together per file, so the tile_size**2/overlap tiles
+        # belonging to one file share a single JPEG decode + polygon RLE decode
+        self._load_file = lru_cache(maxsize=mask_cache_size)(self._load_file_uncached)
 
     def __len__(self):
         return len(self.index)
@@ -80,10 +87,16 @@ class SolarFilamentDataset(Dataset):
             return np.zeros((self.image_height, self.image_width), dtype=np.uint8)
         return build_combined_mask(anns, self.image_height, self.image_width)
 
+    def _load_file_uncached(self, file_name):
+        """Decode image (and mask, if labeled) for a file once, cached per file."""
+        image = self._load_image(file_name)
+        mask = None if self.is_test else self._build_mask_uncached(file_name)
+        return image, mask
+
     def __getitem__(self, idx):
         file_name, y, x = self.index[idx]
 
-        image = self._load_image(file_name)
+        image, full_mask = self._load_file(file_name)
         image_tile = extract_tile(image, y, x, self.tile_size)
 
         if self.is_test:
@@ -93,7 +106,6 @@ class SolarFilamentDataset(Dataset):
             # y, x returned too, so predictions can be stitched back later
             return image_tile, file_name, y, x
 
-        full_mask = self._build_mask(file_name)
         mask_tile = extract_tile(full_mask, y, x, self.tile_size)
 
         if self.transform:
@@ -105,4 +117,39 @@ class SolarFilamentDataset(Dataset):
         # mask stays float, single channel, shape (1, H, W) expected by loss functions
         mask_tile = mask_tile.unsqueeze(0).float()
 
+        if self.return_meta:
+            return image_tile, mask_tile, file_name, y, x
+
         return image_tile, mask_tile
+
+
+class FileGroupedSampler(Sampler):
+    """
+    Yields tile indices grouped by file (file order shuffled each epoch,
+    tiles within a file shuffled too), instead of shuffling every tile
+    globally. Keeps accesses to the same file clustered together so
+    SolarFilamentDataset's per-file image/mask cache actually hits: each
+    file gets decoded ~once per epoch instead of ~once per tile.
+    Use with DataLoader(..., sampler=..., shuffle=False).
+    """
+
+    def __init__(self, dataset, seed=0):
+        self.tiles_per_file = len(dataset.tile_coords)
+        assert len(dataset.index) % self.tiles_per_file == 0
+        self.num_files = len(dataset.index) // self.tiles_per_file
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def __iter__(self):
+        rng = np.random.default_rng(self.seed + self.epoch)
+        file_order = rng.permutation(self.num_files)
+        for f in file_order:
+            block = np.arange(f * self.tiles_per_file, (f + 1) * self.tiles_per_file)
+            rng.shuffle(block)
+            yield from block.tolist()
+
+    def __len__(self):
+        return self.tiles_per_file * self.num_files

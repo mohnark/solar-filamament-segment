@@ -1,37 +1,42 @@
 import numpy as np
  
  
+def _axis_coordinates(size, tile_size, stride):
+    """
+    Top-left coordinates along one axis, evenly spaced to exactly cover
+    [0, size) with `tile_size`-wide tiles.
+
+    A naive fixed-stride walk that clamps the last tile to fit inside bounds
+    leaves a short final stride wherever (size - tile_size) isn't a multiple
+    of stride — e.g. 2048/512/overlap=64 gives strides {448, 448, 448, 448,
+    192}, so the last band is ~57% redundant with its neighbor while the
+    others aren't. Spacing all tiles evenly via linspace spreads that
+    leftover across every gap instead of dumping it all on one edge.
+    """
+    if size <= tile_size:
+        return [0]
+
+    n_tiles = int(np.ceil((size - tile_size) / stride)) + 1
+    positions = np.linspace(0, size - tile_size, n_tiles)
+    # round + dedup: linspace can produce repeats when n_tiles is large
+    # relative to the span, though not for any tile/overlap combo used here
+    return sorted({int(round(p)) for p in positions})
+
+
 def get_tile_coordinates(height, width, tile_size=512, overlap=64):
     """
     Compute top-left (y, x) coordinates for tiles covering the full image,
     with some overlap so filaments crossing tile borders aren't cut cleanly
-    without any shared context.
- 
+    without any shared context. Tiles are evenly spaced per axis (see
+    _axis_coordinates) rather than fixed-stride-then-clamp, so overlap is
+    uniform instead of concentrated in one edge band.
+
     Returns a list of (y, x) tuples.
     """
     stride = tile_size - overlap
-    coords = []
- 
-    y = 0
-    while y < height:
-        x = 0
-        while x < width:
-            # clamp so the last tile in each row/column stays inside bounds
-            y_clamped = min(y, height - tile_size) if height > tile_size else 0
-            x_clamped = min(x, width - tile_size) if width > tile_size else 0
-            coords.append((y_clamped, x_clamped))
- 
-            if x_clamped + tile_size >= width:
-                break
-            x += stride
- 
-        if y_clamped + tile_size >= height:
-            break
-        y += stride
- 
-    # remove duplicates (can happen at clamped edges)
-    coords = sorted(set(coords))
-    return coords
+    ys = _axis_coordinates(height, tile_size, stride)
+    xs = _axis_coordinates(width, tile_size, stride)
+    return [(y, x) for y in ys for x in xs]
  
  
 def extract_tile(array, y, x, tile_size=512):

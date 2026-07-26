@@ -15,5 +15,9 @@
   "lr": 1e-4,
   "seed": 42,
   "pred_threshold": 0.5,
-  "min_area": 20
+  "min_area": 200,
+  "pos_weight": 546,
+  "lr_patience": 3,
+  "early_stop_patience": 6,
+  "use_amp": true
 }
