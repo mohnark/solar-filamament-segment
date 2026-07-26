@@ -4,7 +4,7 @@ from .transform import get_train_transform, get_val_transform
 from .losses import DiceBCELoss
 from .train import set_seed, train_one_epoch, validate
 from .predict import load_model, predict_tiles, build_submission
-from .tiling import get_tile_coordinates, extract_tile, tile_image_and_mask, stitch_predictions
+from .tiling import get_tile_coordinates, extract_tile, stitch_predictions
 
 __all__ = [
     "SolarFilamentDataset",
@@ -21,6 +21,5 @@ __all__ = [
     "build_submission",
     "get_tile_coordinates",
     "extract_tile",
-    "tile_image_and_mask",
     "stitch_predictions",
 ]

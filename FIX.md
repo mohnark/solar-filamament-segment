@@ -4,7 +4,58 @@ Verification pass date: 2026-07-26. All items below re-checked against current
 code (read + ran) in this session. Submission schema (sample_submission.csv
 diff) deferred, out of scope for this pass.
 
-## Verified fixed
+## Fixed this pass (third pass)
+
+- **`DiceLoss` overflowed to `inf` under AMP** (`segres/losses.py`, was the
+  open blocker): `preds.sum(dim=1)` ran at fp16 inside `torch.autocast`, and
+  a 512x512 tile is 262144 pixels against an fp16 max of 65504 — so the sum
+  overflowed once mean sigmoid output passed ~0.25, pinning `dice_loss` at
+  1.0 and sending NaN gradients that `GradScaler` then skipped every step,
+  forever, silently. `forward` now does `torch.sigmoid(preds.float())` and
+  `targets.float()` before the reduction. Verified: the exact fp16 input that
+  used to produce `union=inf` / `loss=1.0` / NaN grad now gives `loss=0.981`
+  with an all-finite gradient. Note the AMP path still hasn't run on a real
+  GPU — no CUDA here.
+
+- **`validate()` buffered the entire val set in RAM** (`segres/train.py`):
+  every tile's prediction and ground truth was held until the loop ended
+  (~52 MB/file, ~5.6 GB over a 107-file val split, before DataLoader
+  prefetch). Now each image is scored and freed as soon as its
+  `len(dataset.tile_coords)` tiles have arrived; predictions are buffered as
+  `float16` and ground truth as `uint8`. Per-image scoring moved into
+  `_ImageScoreAccumulator`; a post-loop pass scores any straggler rather
+  than dropping it. Verified two ways on real data: (a) 5 files, each scored
+  with exactly 25/25 tiles, metrics unchanged in shape; (b) against a loader
+  truncated after 6 batches, the first file was already scored (25 tiles)
+  while only a 5-tile partial remained — proving the flush happens mid-loop,
+  so peak buffer is one image, not the whole split.
+
+- **Train loss divided by the wrong denominator** (`segres/train.py`):
+  `running_loss / len(loader.dataset)` under `drop_last=True` excluded up to
+  `batch_size - 1` samples from the numerator but not the denominator,
+  under-reporting train loss. Now divides by samples actually seen.
+
+- **Normalization mismatched the pretrained encoder** (`segres/transform.py`):
+  was mean/std 0.5/0.5 while the resnet34 encoder is ImageNet-pretrained
+  (smp adapts it to `in_channels=1` by summing the RGB conv weights, so it
+  still expects ImageNet-normalized input). Now 0.449/0.226 — the ImageNet
+  RGB stats collapsed to luminance.
+
+- **`scripts/compute_masks.ipynb` bootstrap cell was empty**: the notebook
+  only imported when cwd == repo root. Restored a `sys.path` cell that
+  resolves the repo root from either location. Verified importing from
+  `scripts/` and from the repo root.
+
+- **Dead code**: deleted `tile_image_and_mask` (`segres/tiling.py`) and
+  `get_image_and_masks` (`segres/decode.py`), both unused by the pipeline,
+  and dropped them from `segres/__init__.py`'s exports. `import segres`
+  verified clean.
+
+- **44 zero-foreground files documented**, not changed: the user's call is to
+  keep them as negative examples. Recorded in `build_combined_mask`'s
+  docstring with the measured numbers so it isn't re-flagged as a finding.
+
+## Verified fixed (earlier passes)
 
 - **Throughput bug** (`segres/dataset.py`, full 2048² JPEG re-decoded per
   tile, 417ms/tile shuffled → 26 min/epoch, 8.7h/20 epochs): `_load_file`
@@ -43,7 +94,7 @@ diff) deferred, out of scope for this pass.
   Unidentifiable / 4 Ambiguous). Ran against real annotations: 5251 anns →
   3296 after filter. Caveat found this pass: 44 of 707 files end up with
   *zero* foreground annotations after the filter (all their anns were
-  category 3/4) — worth a deliberate look, see AUDIT_.md.
+  category 3/4) — decided: kept as negatives, see AUDIT.md.
 
 - **`min_area: 20` ~60x too small** (`config.json`): now `200`. Confirmed in
   config and threaded through `run.py` to both `validate()` and
@@ -78,8 +129,7 @@ diff) deferred, out of scope for this pass.
   — `drop_last=True` on train loader, `ReduceLROnPlateau(mode="max")` stepped
   on `metrics["dice"]`, AMP via `torch.autocast` + `GradScaler` gated on
   `use_amp` and CUDA, early stop after `early_stop_patience` epochs without
-  improvement. **AMP has a new bug found this pass — see AUDIT_.md, not yet
-  fixed.**
+  improvement. (The AMP fp16 bug found that pass is now fixed — see above.)
 
 ## Not re-verified this pass (unchanged from prior audit, still true)
 
@@ -98,6 +148,6 @@ diff) deferred, out of scope for this pass.
   `segres.decode` — true, but the same edit also emptied the
   `sys.path.insert(0, os.path.abspath(".."))` bootstrap cell. The notebook
   now only imports successfully if run with cwd == repo root; from
-  `scripts/` it will `ModuleNotFoundError`. See AUDIT_.md.
+  `scripts/` it will `ModuleNotFoundError`. Fixed this pass, see above.
 - Previous doc said `src/` → `segres/` rename was unstaged. Already committed
   (`f82e9c6`); working tree is clean of it now.

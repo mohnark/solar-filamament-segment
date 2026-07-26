@@ -12,8 +12,16 @@ class DiceLoss(nn.Module):
         """
         preds: raw model output (logits), shape (B, 1, H, W)
         targets: ground-truth mask, values 0 or 1, shape (B, 1, H, W)
+
+        The .float() casts are load-bearing under AMP: inside torch.autocast
+        these tensors arrive as fp16, and summing a 512x512 tile (262144
+        pixels) overflows fp16's 65504 max as soon as the mean sigmoid output
+        exceeds ~0.25. The overflowed union pins dice_loss at 1.0 and sends
+        NaN gradients back, which GradScaler then skips — every step, forever,
+        with no error raised.
         """
-        preds = torch.sigmoid(preds)
+        preds = torch.sigmoid(preds.float())
+        targets = targets.float()
 
         preds = preds.view(preds.size(0), -1)
         targets = targets.view(targets.size(0), -1)
