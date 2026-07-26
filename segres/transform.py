@@ -3,9 +3,14 @@ from albumentations.pytorch import ToTensorV2
  
 IMG_SIZE = 512
  
-# hardcoded for now, single-channel grayscale
-GRAYSCALE_MEAN = (0.5,)
-GRAYSCALE_STD = (0.5,)
+# Single-channel, but the resnet34 encoder is ImageNet-pretrained, and smp
+# adapts it to in_channels=1 by summing the RGB conv weights — i.e. the
+# encoder still expects ImageNet-normalized input. These are the ImageNet
+# RGB stats collapsed to luminance (0.299R + 0.587G + 0.114B), so the input
+# distribution matches what the pretrained weights were trained on. Plain
+# 0.5/0.5 shifted and scaled it away from that.
+GRAYSCALE_MEAN = (0.449,)
+GRAYSCALE_STD = (0.226,)
  
  
 def get_train_transform():

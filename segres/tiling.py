@@ -50,25 +50,6 @@ def extract_tile(array, y, x, tile_size=512):
     return np.ascontiguousarray(tile)
  
  
-def tile_image_and_mask(image, mask, tile_size=512, overlap=64):
-    """
-    Split one image and its matching mask into a list of tile pairs.
- 
-    image, mask: 2D numpy arrays, same height/width
-    Returns: list of (image_tile, mask_tile, y, x) tuples
-    """
-    height, width = image.shape[:2]
-    coords = get_tile_coordinates(height, width, tile_size, overlap)
- 
-    tiles = []
-    for (y, x) in coords:
-        image_tile = extract_tile(image, y, x, tile_size)
-        mask_tile = extract_tile(mask, y, x, tile_size)
-        tiles.append((image_tile, mask_tile, y, x))
- 
-    return tiles
- 
- 
 def stitch_predictions(pred_tiles, coords, height, width, tile_size=512):
     """
     Reassemble predicted tiles into a full-resolution mask.

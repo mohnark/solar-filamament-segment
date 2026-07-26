@@ -75,6 +75,13 @@ def build_combined_mask(annotations, height, width, category_ids=DEFAULT_CATEGOR
     labels. Pass category_ids=None to include everything (old behavior).
     Chirality (Left/Right, category 1 vs 2) is still collapsed into one
     binary mask here — this only decides what counts as foreground at all.
+
+    Measured effect on the real annotation file: 5251 annotations -> 3296,
+    and 44 of the 707 files come out with an all-zero mask because every
+    annotation on them was category 3/4. That is intended, not a bug: those
+    files stay in the split as legitimate negative examples, on the same
+    reasoning as the filter itself — if the annotator couldn't confidently
+    call it a filament, the model shouldn't be taught that it is one.
     """
     combined = np.zeros((height, width), dtype=np.uint8)
 
@@ -86,29 +93,3 @@ def build_combined_mask(annotations, height, width, category_ids=DEFAULT_CATEGOR
         combined = np.logical_or(combined, m).astype(np.uint8)
 
     return combined
-
-
-def get_image_and_masks(json_path, image_id):
-    """
-    Convenience function. Loads annotations and returns everything needed
-    to visualize one image: file name, height, width, and combined mask.
-    """
-    data = load_annotations(json_path)
-    images_by_id, anns_by_image_id = build_lookup_tables(data)
-
-    if image_id not in images_by_id:
-        raise ValueError(f"image_id '{image_id}' not found in annotations.")
-
-    image_info = images_by_id[image_id]
-    height = image_info["height"]
-    width = image_info["width"]
-    file_name = image_info["file_name"]
-
-    annotations = anns_by_image_id.get(image_id, [])
-    print(f"Found {len(annotations)} filament annotation(s) for image {image_id}")
-
-    if len(annotations) == 0:
-        return file_name, height, width, None
-
-    combined_mask = build_combined_mask(annotations, height, width)
-    return file_name, height, width, combined_mask

@@ -21,6 +21,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device, scaler=None):
     """
     model.train()
     running_loss = 0.0
+    seen = 0
     amp_enabled = scaler is not None and scaler.is_enabled()
 
     for images, masks in loader:
@@ -41,8 +42,11 @@ def train_one_epoch(model, loader, optimizer, loss_fn, device, scaler=None):
             optimizer.step()
 
         running_loss += loss.item() * images.size(0)
+        seen += images.size(0)
 
-    return running_loss / len(loader.dataset)
+    # divide by samples actually seen, not len(dataset): drop_last=True can
+    # discard up to batch_size - 1 samples, which never reach the numerator
+    return running_loss / seen if seen else 0.0
 
 
 def _instance_match_counts(pred_instances, gt_instances, iou_thresh):
@@ -71,6 +75,53 @@ def _instance_match_counts(pred_instances, gt_instances, iou_thresh):
     return tp, fp, fn
 
 
+class _ImageScoreAccumulator:
+    """Running tally of image-level validation metrics.
+
+    Each image is scored and discarded as soon as all of its tiles have
+    arrived, so only one image's tiles are ever held (see validate()).
+    """
+
+    def __init__(self, dataset, threshold, min_area, iou_thresh):
+        self.dataset = dataset
+        self.threshold = threshold
+        self.min_area = min_area
+        self.iou_thresh = iou_thresh
+
+        self.dices = []  # only images with at least one ground-truth filament pixel
+        self.empty_total = 0
+        self.empty_correct = 0
+        self.tp = self.fp = self.fn = 0
+
+    def add_image(self, entry):
+        dataset = self.dataset
+        stitched_pred = stitch_predictions(
+            entry["pred_tiles"], entry["coords"], dataset.image_height, dataset.image_width, dataset.tile_size
+        )
+        stitched_gt = stitch_predictions(
+            entry["gt_tiles"], entry["coords"], dataset.image_height, dataset.image_width, dataset.tile_size
+        )
+
+        pred_binary, pred_instances = label_and_filter(
+            (stitched_pred > self.threshold).astype(np.uint8), min_area=self.min_area
+        )
+        gt_binary, gt_instances = label_and_filter((stitched_gt > 0.5).astype(np.uint8), min_area=1)
+
+        if gt_binary.sum() == 0:
+            self.empty_total += 1
+            if pred_binary.sum() == 0:
+                self.empty_correct += 1
+        else:
+            intersection = np.logical_and(pred_binary, gt_binary).sum()
+            union = pred_binary.sum() + gt_binary.sum()
+            self.dices.append(2.0 * intersection / union if union > 0 else 1.0)
+
+        img_tp, img_fp, img_fn = _instance_match_counts(pred_instances, gt_instances, self.iou_thresh)
+        self.tp += img_tp
+        self.fp += img_fp
+        self.fn += img_fn
+
+
 def validate(model, loader, loss_fn, device, threshold=0.5, min_area=20, iou_thresh=0.5):
     """
     Runs validation loss per-tile (cheap, matches training objective), but
@@ -78,7 +129,8 @@ def validate(model, loader, loss_fn, device, threshold=0.5, min_area=20, iou_thr
     the competition actually scores predictions.
 
     `loader` must be built with SolarFilamentDataset(..., return_meta=True)
-    so tiles carry (file_name, y, x) for stitching.
+    so tiles carry (file_name, y, x) for stitching, and with shuffle=False so
+    a file's tiles arrive contiguously.
 
     Per-tile dice with additive smoothing scores an empty tile 1.0 regardless
     of the prediction (72.8% of tiles have no filament), so an all-background
@@ -86,12 +138,21 @@ def validate(model, loader, loss_fn, device, threshold=0.5, min_area=20, iou_thr
     background. Stitching first and reporting empty/non-empty images
     separately avoids that: dice is only computed where there's a filament to
     find, and an all-background model scores 0 there instead of ~0.73.
+
+    Tiles are scored and freed per image rather than buffered for the whole
+    val set: holding every prediction+ground-truth pair to the end costs
+    ~52 MB/file (~5.6 GB over a 107-file val split), which OOMs constrained
+    machines once DataLoader prefetch is stacked on top. Predictions are kept
+    as float16 and ground truth as uint8 in the buffer for the same reason.
     """
     dataset = loader.dataset
+    tiles_per_file = len(dataset.tile_coords)
     model.eval()
     running_loss = 0.0
+    seen = 0
 
-    results = {}  # file_name -> {"pred_tiles": [...], "gt_tiles": [...], "coords": [...]}
+    acc = _ImageScoreAccumulator(dataset, threshold, min_area, iou_thresh)
+    pending = {}  # file_name -> {"pred_tiles": [...], "gt_tiles": [...], "coords": [...]}
 
     with torch.no_grad():
         for images, masks, file_names, ys, xs in loader:
@@ -101,47 +162,33 @@ def validate(model, loader, loss_fn, device, threshold=0.5, min_area=20, iou_thr
             preds = model(images)
             loss = loss_fn(preds, masks)
             running_loss += loss.item() * images.size(0)
+            seen += images.size(0)
 
-            probs = torch.sigmoid(preds).cpu().numpy()[:, 0]  # (B, H, W)
-            gt = masks.cpu().numpy()[:, 0]  # (B, H, W)
+            probs = torch.sigmoid(preds).cpu().numpy()[:, 0].astype(np.float16)  # (B, H, W)
+            gt = masks.cpu().numpy()[:, 0].astype(np.uint8)  # (B, H, W)
 
             for i, file_name in enumerate(file_names):
-                entry = results.setdefault(file_name, {"pred_tiles": [], "gt_tiles": [], "coords": []})
+                entry = pending.setdefault(file_name, {"pred_tiles": [], "gt_tiles": [], "coords": []})
                 entry["pred_tiles"].append(probs[i])
                 entry["gt_tiles"].append(gt[i])
                 entry["coords"].append((ys[i].item(), xs[i].item()))
 
-    avg_loss = running_loss / len(loader.dataset)
+                if len(entry["coords"]) == tiles_per_file:
+                    acc.add_image(entry)
+                    del pending[file_name]
 
-    dices = []  # only images with at least one ground-truth filament pixel
-    empty_total = 0
-    empty_correct = 0
-    tp = fp = fn = 0
+    # nothing should be left: every file contributes exactly tiles_per_file
+    # tiles and val_loader has no drop_last. Score any stragglers anyway
+    # rather than silently dropping them from the metrics.
+    for entry in pending.values():
+        acc.add_image(entry)
 
-    for entry in results.values():
-        stitched_pred = stitch_predictions(
-            entry["pred_tiles"], entry["coords"], dataset.image_height, dataset.image_width, dataset.tile_size
-        )
-        stitched_gt = stitch_predictions(
-            entry["gt_tiles"], entry["coords"], dataset.image_height, dataset.image_width, dataset.tile_size
-        )
+    avg_loss = running_loss / seen if seen else 0.0
 
-        pred_binary, pred_instances = label_and_filter((stitched_pred > threshold).astype(np.uint8), min_area=min_area)
-        gt_binary, gt_instances = label_and_filter((stitched_gt > 0.5).astype(np.uint8), min_area=1)
-
-        if gt_binary.sum() == 0:
-            empty_total += 1
-            if pred_binary.sum() == 0:
-                empty_correct += 1
-        else:
-            intersection = np.logical_and(pred_binary, gt_binary).sum()
-            union = pred_binary.sum() + gt_binary.sum()
-            dices.append(2.0 * intersection / union if union > 0 else 1.0)
-
-        img_tp, img_fp, img_fn = _instance_match_counts(pred_instances, gt_instances, iou_thresh)
-        tp += img_tp
-        fp += img_fp
-        fn += img_fn
+    dices = acc.dices
+    empty_total = acc.empty_total
+    empty_correct = acc.empty_correct
+    tp, fp, fn = acc.tp, acc.fp, acc.fn
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
