@@ -9,11 +9,11 @@
    run is possible. If val shows heavy over-prediction, try 10-50 or move to
    focal/Tversky.
 
-3. `workflow.ipynb` duplicates `run.py` but filters only `.jpeg` (vs
-   `.jpg`/`.png` too) and calls `build_submission(...)` with the old
-   signature (no `image_height`/`image_width`) — it will crash if run.
-   **Decision: leave as-is**; `run.py` is the maintained copy. Two sources
-   of truth that disagree, knowingly.
+3. ~~`workflow.ipynb` duplicates `run.py` but disagrees with it~~ — resolved
+   2026-07-26: `run.py` deleted, `workflow.ipynb` rewritten to match its
+   logic (correct file-extension filter, `FileGroupedSampler`, resume,
+   AMP, early stop, fixed `build_submission` signature). Notebook is now
+   the single maintained copy; run/toggle flags live in its first cell.
 
 4. The `category_ids={1, 2}` filter leaves 44 of 707 files with zero
    foreground annotations (every annotation on them was category 3/4), and
