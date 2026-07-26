@@ -1,17 +1,8 @@
-import os
-import random
- 
+import random 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
  
-from dataset import SolarFilamentDataset
-from transform import get_train_transform, get_val_transform
-from model import build_model
-from losses import DiceBCELoss
- 
- 
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -20,7 +11,6 @@ def set_seed(seed=42):
  
  
 def dice_score(preds, targets, threshold=0.5, smooth=1.0):
-    """Compute Dice score for logging, not used for backprop."""
     preds = torch.sigmoid(preds)
     preds = (preds > threshold).float()
  

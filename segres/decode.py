@@ -37,6 +37,24 @@ def polygon_to_mask(segmentation, height, width):
     return binary_mask
 
 
+def build_file_to_annotations(data):
+    """
+    Map file_name -> merged list of annotations.
+
+    The raw annotation file lists the same physical image under multiple
+    image_ids (one per annotation batch), so annotations for one file_name
+    must be gathered across every image_id that shares it, not just one.
+    """
+    images_by_id, anns_by_image_id = build_lookup_tables(data)
+
+    file_to_anns = {}
+    for image_id, image_info in images_by_id.items():
+        file_name = image_info["file_name"]
+        file_to_anns.setdefault(file_name, []).extend(anns_by_image_id.get(image_id, []))
+
+    return file_to_anns
+
+
 def build_combined_mask(annotations, height, width):
     """Combine all filament masks for one image into a single binary mask."""
     combined = np.zeros((height, width), dtype=np.uint8)

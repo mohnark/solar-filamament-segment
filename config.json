@@ -1,0 +1,19 @@
+{
+  "train_images_dir": "data/MAGFiLO_1.0_Kaggle_2026/train/train_images",
+  "train_annotations": "data/MAGFiLO_1.0_Kaggle_2026/train/MAGFiLO_1.0_Annotations_kaggle2026_train.json",
+  "test_images_dir": "data/MAGFiLO_1.0_Kaggle_2026/test/test_images",
+  "checkpoint_path": "data/processed/model.pt",
+  "submission_path": "data/processed/submission.csv",
+  "image_height": 2048,
+  "image_width": 2048,
+  "tile_size": 512,
+  "overlap": 64,
+  "val_fraction": 0.15,
+  "batch_size": 8,
+  "num_workers": 4,
+  "epochs": 20,
+  "lr": 1e-4,
+  "seed": 42,
+  "pred_threshold": 0.5,
+  "min_area": 20
+}
