@@ -2,3 +2,5 @@ venv
 /data
 __pycache__
 .vscode
+visuals
+.claude
