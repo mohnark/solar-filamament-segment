@@ -11,5 +11,5 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 
 find_package(pybind11 REQUIRED)
 
-pybind11_add_module(ccl_cpp ccl.cpp)
+pybind11_add_module(ccl_cpp ccl.cpp preprocess.cpp)
 target_compile_features(ccl_cpp PRIVATE cxx_std_17)

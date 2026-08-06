@@ -5,6 +5,8 @@
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 
+#include "preprocess.hpp"
+
 namespace py = pybind11;
 
 
@@ -192,16 +194,48 @@ py::tuple label_and_filter_py(ByteArray mask, int min_area) {
     return py::make_tuple(cleaned_out, instances_out);
 }
 
+py::tuple flatten_disk_py(ByteArray img, int median_window) {
+    check_2d(img);
+    const int height = static_cast<int>(img.shape(0));
+    const int width = static_cast<int>(img.shape(1));
+
+    FlattenDiskResult result = flatten_disk(img.data(), height, width, median_window);
+
+    py::array_t<float> flat_out({height, width});
+    std::copy(result.flattened.begin(), result.flattened.end(), flat_out.mutable_data());
+
+    return py::make_tuple(flat_out, result.cy, result.cx, result.radius);
+}
+
+py::array_t<uint8_t> mask_outside_radius_py(ByteArray mask, double cy, double cx, double radius, double frac) {
+    check_2d(mask);
+    const int height = static_cast<int>(mask.shape(0));
+    const int width = static_cast<int>(mask.shape(1));
+
+    py::array_t<uint8_t> out({height, width});
+    std::copy(mask.data(), mask.data() + mask.size(), out.mutable_data());
+    mask_outside_radius(out.mutable_data(), height, width, cy, cx, radius, frac);
+    return out;
+}
+
 } // namespace
 
 PYBIND11_MODULE(ccl_cpp, m) {
-    m.doc() = "Connected-component labeling (4-connectivity), a from-scratch "
-              "replacement for the scipy.ndimage.label + numpy pattern used "
-              "in segres/predict.py::label_and_filter.";
+    m.doc() = "From-scratch C++ replacements for the scipy/numpy patterns in "
+              "segres/predict.py and segres/preprocess.py: connected-component "
+              "labeling and per-image limb-darkening correction.";
 
     m.def("label", &label_py, py::arg("mask"),
           "label(mask) -> (labels: int32 HxW array, num_blobs: int)");
 
     m.def("label_and_filter", &label_and_filter_py, py::arg("mask"), py::arg("min_area") = 1,
           "label_and_filter(mask, min_area) -> (cleaned: uint8 HxW array, instances: list of uint8 HxW arrays)");
+
+    m.def("flatten_disk", &flatten_disk_py, py::arg("img"), py::arg("median_window") = 9,
+          "flatten_disk(img, median_window=9) -> (flattened: float32 HxW array, cy, cx, radius)");
+
+    m.def("mask_outside_radius", &mask_outside_radius_py,
+          py::arg("mask"), py::arg("cy"), py::arg("cx"), py::arg("radius"), py::arg("frac") = 0.98,
+          "mask_outside_radius(mask, cy, cx, radius, frac=0.98) -> uint8 HxW array, "
+          "pixels beyond frac*radius from (cy, cx) zeroed");
 }
